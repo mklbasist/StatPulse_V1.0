@@ -3,9 +3,34 @@ import pandas as pd
 import re
 import sqlite3
 import os
+import requests
 
-# Load SQLite DB instead of CSV
-db_path = os.path.join("data", "cricpulse.db")
+# Paths
+os.makedirs("data", exist_ok=True)
+csv_path = "data/test_bbb_2.csv"
+db_path = "data/cricpulse.db"
+
+# Google Drive direct download link
+CSV_URL = "https://drive.google.com/uc?export=download&id=12ZqcsuB91YzC2bD8fDjSQuzbyqKBjHBN"
+
+# Download CSV if not present
+if not os.path.exists(csv_path):
+    print("CSV not found, downloading from Google Drive...")
+    r = requests.get(CSV_URL)
+    with open(csv_path, "wb") as f:
+        f.write(r.content)
+    print("CSV downloaded successfully!")
+
+# Generate DB if not present
+if not os.path.exists(db_path):
+    print("Generating SQLite DB from CSV...")
+    df_csv = pd.read_csv(csv_path, low_memory=False)
+    conn = sqlite3.connect(db_path)
+    df_csv.to_sql("matches", conn, if_exists="replace", index=False)
+    conn.close()
+    print("DB generated successfully!")
+
+# Load SQLite DB
 conn = sqlite3.connect(db_path)
 df = pd.read_sql("SELECT * FROM matches", conn)
 conn.close()
