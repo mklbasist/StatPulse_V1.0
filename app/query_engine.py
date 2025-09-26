@@ -23,6 +23,8 @@ def _extract_against(query_lower: str):
 # Main query function
 def answer_query(query: str):
     query_lower = query.lower().strip()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
 
     # Open a new SQLite connection per query (thread-safe)
     conn = sqlite3.connect(db_path)
