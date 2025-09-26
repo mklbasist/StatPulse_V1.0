@@ -1,23 +1,24 @@
+# query_engine.py
 import sqlite3
-import pandas as pd
-import os
 import re
+import os
 
-# Path to DB in repo
+# Paths
 db_path = os.path.join("data", "cricpulse.db")
 
-# Load SQLite DB
+# Connect to DB
 conn = sqlite3.connect(db_path)
-df = pd.read_sql("SELECT * FROM matches", conn)
-conn.close()
+conn.row_factory = sqlite3.Row  # for dict-like access
 
-# Player list
+# Fetch unique players for detection
+players = conn.execute("SELECT DISTINCT bat FROM matches").fetchall()
+bowlers = conn.execute("SELECT DISTINCT bowl FROM matches").fetchall()
 PLAYERS = sorted(
-    set(df["bat"].dropna().unique()).union(set(df["bowl"].dropna().unique())),
+    [p["bat"] for p in players if p["bat"]] + [b["bowl"] for b in bowlers if b["bowl"]],
     key=lambda x: -len(str(x))
 )
 
-# Helper functions
+# Helpers
 def _find_player(query_lower: str):
     for p in PLAYERS:
         if p and p.lower() in query_lower:
@@ -32,68 +33,114 @@ def _extract_against(query_lower: str):
     m = re.search(r'\bagainst\s+([a-z ]+?)(?:\s|$)', query_lower)
     return m.group(1).strip() if m else None
 
+# Main function
 def answer_query(query: str):
     query_lower = query.lower().strip()
-
+    
+    # Detect player
     player = _find_player(query_lower)
     if not player:
         return {"error": "Player not found in dataset"}
 
-    # Filter dataset for player
-    df_player = df[(df["bat"] == player) | (df["bowl"] == player)]
-
+    # Filters
     country = _extract_country(query_lower)
-    if country:
-        df_player = df_player[df_player["country"].str.lower() == country.lower()]
-
     opposition = _extract_against(query_lower)
-    if opposition:
-        df_player = df_player[
-            (df_player["team_bowl"].str.lower() == opposition.lower()) |
-            (df_player["team_bat"].str.lower() == opposition.lower())
-        ]
 
-    # Batting stats
+    # Build WHERE clauses
+    conditions = []
+    params = []
+
+    if country:
+        conditions.append("country LIKE ?")
+        params.append(f"%{country}%")
+    if opposition:
+        conditions.append("(team_bowl LIKE ? OR team_bat LIKE ?)")
+        params.extend([f"%{opposition}%", f"%{opposition}%"])
+
+    # Base query
+    where_clause = f"WHERE ({' AND '.join(conditions)})" if conditions else ""
+
+    # 1️⃣ Runs
     if "run" in query_lower and "average" not in query_lower:
-        runs = df_player[df_player["bat"] == player]["batruns"].sum()
+        sql = f"SELECT SUM(batruns) as total_runs FROM matches {where_clause} AND bat = ?"
+        params_runs = params + [player]
+        row = conn.execute(sql, params_runs).fetchone()
+        runs = row["total_runs"] if row and row["total_runs"] is not None else 0
         return {"player": player, "runs": int(runs), "country": country, "against": opposition}
 
+    # 2️⃣ Batting Average
     if "average" in query_lower or "ave" in query_lower:
-        runs = df_player[df_player["bat"] == player]["batruns"].sum()
-        outs = df_player[(df_player["bat"] == player) & (df_player["bat_out"].notna())].shape[0]
-        average = runs / outs if outs > 0 else runs
+        sql_runs = f"SELECT SUM(batruns) as total_runs FROM matches {where_clause} AND bat = ?"
+        sql_outs = f"SELECT COUNT(*) as outs FROM matches {where_clause} AND bat = ? AND bat_out IS NOT NULL"
+        params_avg = params + [player]
+        total_runs = conn.execute(sql_runs, params_avg).fetchone()["total_runs"] or 0
+        outs = conn.execute(sql_outs, params_avg).fetchone()["outs"] or 0
+        average = total_runs / outs if outs > 0 else total_runs
         return {"player": player, "batting_average": round(average, 2), "country": country, "against": opposition}
 
+    # 3️⃣ 50s
     if "50" in query_lower or "fifty" in query_lower:
-        innings = df_player[df_player["bat"] == player].groupby(["p_match", "inns"])["batruns"].sum()
-        fifties = innings[(innings >= 50) & (innings < 100)].count()
-        return {"player": player, "50s": int(fifties), "country": country, "against": opposition}
+        sql = f"""
+        SELECT p_match, inns, SUM(batruns) as runs_sum
+        FROM matches {where_clause} AND bat = ?
+        GROUP BY p_match, inns
+        HAVING runs_sum >= 50 AND runs_sum < 100
+        """
+        params_50 = params + [player]
+        rows = conn.execute(sql, params_50).fetchall()
+        return {"player": player, "50s": len(rows), "country": country, "against": opposition}
 
+    # 4️⃣ 100s
     if "100" in query_lower or "century" in query_lower:
-        innings = df_player[df_player["bat"] == player].groupby(["p_match", "inns"])["batruns"].sum()
-        hundreds = innings[innings >= 100].count()
-        return {"player": player, "100s": int(hundreds), "country": country, "against": opposition}
+        sql = f"""
+        SELECT p_match, inns, SUM(batruns) as runs_sum
+        FROM matches {where_clause} AND bat = ?
+        GROUP BY p_match, inns
+        HAVING runs_sum >= 100
+        """
+        params_100 = params + [player]
+        rows = conn.execute(sql, params_100).fetchall()
+        return {"player": player, "100s": len(rows), "country": country, "against": opposition}
 
+    # 5️⃣ Highest Score
     if "highest" in query_lower or "top score" in query_lower or "best score" in query_lower:
-        innings = df_player[df_player["bat"] == player].groupby(["p_match", "inns"])["batruns"].sum()
-        highest = innings.max() if not innings.empty else None
+        sql = f"""
+        SELECT SUM(batruns) as runs_sum
+        FROM matches {where_clause} AND bat = ?
+        GROUP BY p_match, inns
+        ORDER BY runs_sum DESC
+        LIMIT 1
+        """
+        params_hs = params + [player]
+        row = conn.execute(sql, params_hs).fetchone()
+        highest = row["runs_sum"] if row else None
         return {"player": player, "highest_score": int(highest) if highest else None, "country": country, "against": opposition}
 
-    # Bowling stats
+    # 6️⃣ Balls Faced
+    if "ball" in query_lower or "faced" in query_lower:
+        sql = f"SELECT SUM(ballfaced) as balls FROM matches {where_clause} AND bat = ?"
+        params_bf = params + [player]
+        row = conn.execute(sql, params_bf).fetchone()
+        balls = row["balls"] or 0
+        return {"player": player, "balls_faced": int(balls), "country": country, "against": opposition}
+
+    # 7️⃣ Wickets
     if "wicket" in query_lower:
-        wkts = df_player[df_player["bowl"] == player]["p_out"].count()
+        sql = f"SELECT COUNT(*) as wkts FROM matches {where_clause} AND bowl = ? AND p_out IS NOT NULL"
+        params_wkts = params + [player]
+        wkts = conn.execute(sql, params_wkts).fetchone()["wkts"] or 0
         return {"player": player, "wickets": int(wkts), "country": country, "against": opposition}
 
+    # 8️⃣ Economy
     if "economy" in query_lower:
-        bowler_df = df_player[df_player["bowl"] == player]
-        runs_conceded = bowler_df["bowlruns"].sum()
-        overs = bowler_df.shape[0] / 6
+        sql_runs = f"SELECT SUM(bowlruns) as runs_conceded, COUNT(*) as balls_bowled FROM matches {where_clause} AND bowl = ?"
+        params_ec = params + [player]
+        row = conn.execute(sql_runs, params_ec).fetchone()
+        runs_conceded = row["runs_conceded"] or 0
+        balls_bowled = row["balls_bowled"] or 0
+        overs = balls_bowled / 6 if balls_bowled > 0 else 0
         economy = runs_conceded / overs if overs > 0 else 0
         return {"player": player, "economy": round(economy, 2), "country": country, "against": opposition}
 
-    # Balls faced
-    if "ball" in query_lower or "faced" in query_lower:
-        balls = df_player[df_player["bat"] == player]["ballfaced"].sum()
-        return {"player": player, "balls_faced": int(balls), "country": country, "against": opposition}
-
+    # Fallback
     return {"info": f"Query understood but not handled yet for {player}"}
