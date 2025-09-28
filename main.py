@@ -6,6 +6,7 @@ app = FastAPI(title="StatPulse API")
 
 origins = [
     "https://mklbasist.github.io",
+    "https://streamxcric.vercel.app",
     "http://localhost:8000",
 ]
 
