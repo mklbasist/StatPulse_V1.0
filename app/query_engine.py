@@ -86,7 +86,6 @@ def answer_query(query: str):
         sql_outs = f"""
             SELECT COUNT(*) as outs
             FROM matches {where_clause}
-            AND bat_out IS NOT NULL
             AND bat_out NOT LIKE '%not out%'
         """
 
