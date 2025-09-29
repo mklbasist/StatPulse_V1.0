@@ -80,24 +80,28 @@ def answer_query(query: str):
 
     # Batting average
     if "average" in query_lower or "ave" in query_lower:
+    # Build where clause like other queries
+        where_clause, base_params = build_where("bat", player, conditions)
+    
+        # Total runs
         sql_runs = f"""
-        SELECT SUM(batruns) as total_runs
-        FROM matches {where_clause}
+            SELECT SUM(batruns) as total_runs
+            FROM matches {where_clause}
         """
+        # Total outs
         sql_outs = f"""
-        SELECT COUNT(DISTINCT p_match || '-' || inns) as outs
-        FROM matches {where_clause} AND bat_out IS NOT NULL
+            SELECT COUNT(DISTINCT p_match || '-' || inns) as outs
+            FROM matches {where_clause} AND bat_out IS NOT NULL
         """
-        params_avg = params + [player]
-        total_runs = conn.execute(sql_runs, params_avg).fetchone()["total_runs"] or 0
-        outs = conn.execute(sql_outs, params_avg).fetchone()["outs"] or 0
+        total_runs = conn.execute(sql_runs, base_params + params).fetchone()["total_runs"] or 0
+        outs = conn.execute(sql_outs, base_params + params).fetchone()["outs"] or 0
         average = total_runs / outs if outs > 0 else total_runs
         conn.close()
         return {
-        "player": player,
-        "batting_average": round(average, 2),
-        "country": country,
-        "against": opposition
+            "player": player,
+            "batting_average": round(average, 2),
+            "country": country,
+            "against": opposition
     }
 
     # 50s
